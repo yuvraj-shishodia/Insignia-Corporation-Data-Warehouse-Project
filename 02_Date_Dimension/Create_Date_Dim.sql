@@ -1,66 +1,54 @@
--- Date_Dimension_Load.sql
--- Creates and populates the Date Dimension with fiscal year logic
+-- Create_Date_Dim.sql
+-- Date dimension for 2000-01-01 to 2023-12-31 with the company's July-June fiscal year.
+-- Built set-based in one INSERT, and only when empty, so rerunning the script never drops it.
 
 USE Insignia_DW;
 GO
 
-IF OBJECT_ID('Dim_Date') IS NOT NULL
-    DROP TABLE Dim_Date;
-GO
-
-CREATE TABLE Dim_Date (
-    DateKey INT PRIMARY KEY,
-    [Date] DATE,
-    Day_Number INT,
-    Month_Name VARCHAR(20),
-    Short_Month CHAR(3),
-    Calendar_Month_Number INT,
-    Calendar_Year INT,
-    Fiscal_Month_Number INT,
-    Fiscal_Year INT,
-    Week_Number INT
+IF OBJECT_ID('dbo.Dim_Date') IS NULL
+CREATE TABLE dbo.Dim_Date (
+    DateKey               INT         NOT NULL PRIMARY KEY,  -- yyyymmdd, e.g. 20230701
+    [Date]                DATE        NULL,
+    Day_Number            TINYINT     NULL,                  -- day of the month
+    Month_Name            VARCHAR(10) NOT NULL,
+    Short_Month           CHAR(3)     NOT NULL,
+    Calendar_Month_Number TINYINT     NULL,
+    Calendar_Year         SMALLINT    NULL,
+    Fiscal_Month_Number   TINYINT     NULL,                  -- July = 1 ... June = 12
+    Fiscal_Year           SMALLINT    NULL,                  -- named by the year it ends: Jul 2022 - Jun 2023 = FY2023
+    Week_Number           TINYINT     NULL                   -- DATEPART(WEEK), depends on SET DATEFIRST
 );
 GO
 
-DECLARE @StartDate DATE = '2000-01-01';
-DECLARE @EndDate DATE = '2023-12-31';
-
-WHILE @StartDate <= @EndDate
+IF NOT EXISTS (SELECT 1 FROM dbo.Dim_Date WHERE DateKey > 0)
 BEGIN
-    DECLARE @DateKey INT = CAST(CONVERT(CHAR(8), @StartDate, 112) AS INT);
-    DECLARE @DayNumber INT = DAY(@StartDate);
-    DECLARE @MonthName VARCHAR(20) = DATENAME(MONTH, @StartDate);
-    DECLARE @ShortMonth CHAR(3) = LEFT(DATENAME(MONTH, @StartDate), 3);
-    DECLARE @CalendarMonth INT = MONTH(@StartDate);
-    DECLARE @CalendarYear INT = YEAR(@StartDate);
-    DECLARE @WeekNumber INT = DATEPART(WEEK, @StartDate);
+    DECLARE @Start DATE = '2000-01-01', @End DATE = '2023-12-31';
 
-    DECLARE @FiscalYear INT, @FiscalMonth INT;
-    IF @CalendarMonth >= 7
-    BEGIN
-        SET @FiscalYear = @CalendarYear + 1;
-        SET @FiscalMonth = @CalendarMonth - 6;
-    END
-    ELSE
-    BEGIN
-        SET @FiscalYear = @CalendarYear;
-        SET @FiscalMonth = @CalendarMonth + 6;
-    END
-
-    INSERT INTO Dim_Date
-    VALUES (
-        @DateKey,
-        @StartDate,
-        @DayNumber,
-        @MonthName,
-        @ShortMonth,
-        @CalendarMonth,
-        @CalendarYear,
-        @FiscalMonth,
-        @FiscalYear,
-        @WeekNumber
-    );
-
-    SET @StartDate = DATEADD(DAY, 1, @StartDate);
+    WITH Numbers AS (
+        SELECT TOP (DATEDIFF(DAY, @Start, @End) + 1)
+               ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) - 1 AS n
+        FROM sys.all_objects a CROSS JOIN sys.all_objects b
+    ),
+    Dates AS (
+        SELECT DATEADD(DAY, n, @Start) AS d FROM Numbers
+    )
+    INSERT INTO dbo.Dim_Date (DateKey, [Date], Day_Number, Month_Name, Short_Month, Calendar_Month_Number,
+                              Calendar_Year, Fiscal_Month_Number, Fiscal_Year, Week_Number)
+    SELECT CONVERT(INT, CONVERT(CHAR(8), d, 112)),
+           d,
+           DAY(d),
+           DATENAME(MONTH, d),
+           LEFT(DATENAME(MONTH, d), 3),
+           MONTH(d),
+           YEAR(d),
+           (MONTH(d) + 5) % 12 + 1,                              -- 7 -> 1, 12 -> 6, 1 -> 7, 6 -> 12
+           YEAR(d) + CASE WHEN MONTH(d) >= 7 THEN 1 ELSE 0 END,
+           DATEPART(WEEK, d)
+    FROM Dates;
 END
+GO
+
+-- Unknown member: a fact row without a usable date points here instead of being dropped.
+IF NOT EXISTS (SELECT 1 FROM dbo.Dim_Date WHERE DateKey = -1)
+    INSERT INTO dbo.Dim_Date (DateKey, Month_Name, Short_Month) VALUES (-1, 'Unknown', 'UNK');
 GO
